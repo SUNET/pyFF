@@ -17,9 +17,9 @@ from io import BytesIO
 from typing import Optional
 from urllib.parse import quote_plus, urlparse
 
-import xmlsec
-from lxml import etree
-from lxml.etree import DocumentInvalid
+import pybergshamra
+from pyuppsala import etree
+from pyuppsala.etree import DocumentInvalid
 from str2bool import str2bool
 
 from pyff.constants import NS
@@ -43,6 +43,8 @@ from pyff.samlmd import (
     sort_entities,
 )
 from pyff.utils import (
+    cert_dict,
+    cert_info,
     datetime2iso,
     dumptree,
     duration2timedelta,
@@ -706,7 +708,10 @@ def load(req: Plumbing.Request, *opts):
         req.md.rm.add_child(url, child_opts)
 
     log.debug("Refreshing all resources")
-    req.md.rm.reload(fail_on_error=bool(_opts['fail_on_error']))
+    req.md.rm.reload(
+        fail_on_error=bool(_opts['fail_on_error']),
+        max_workers=int(_opts['max_workers']),
+    )
 
 
 def _select_args(req):
@@ -1170,12 +1175,63 @@ def sign(req: Plumbing.Request, *_opts):
     if cert_file is None:
         log.info("Attempting to extract certificate from token...")
 
-    opts = dict()
+    # Build the signing context. The reference id (if any) comes from the @ID
+    # attribute on the document root; pybergshamra already treats "ID" as a
+    # default id attribute, so we must NOT call ctx.add_id_attr("ID").
     relt = root(req.t)
     idattr = relt.get('ID')
-    if idattr:
-        opts['reference_uri'] = f'#{idattr}'
-    xmlsec.sign(req.t, key_file, cert_file, **opts)
+
+    # Read the certificate (if provided) as PEM text to embed in X509Data.
+    cert_pem = None
+    if cert_file is not None:
+        with open(cert_file) as fd:
+            cert_pem = fd.read()
+
+    mgr = pybergshamra.KeysManager()
+    ctx = pybergshamra.DsigContext(mgr)
+
+    if key_file.startswith("pkcs11:"):
+        # HSM signing via PKCS#11. The URI form is:
+        #   pkcs11://<module path>[:slot]/<label>[?pin=<pin>]
+        # where pin may be "env:VARNAME" (default env:PYKCS11PIN).
+        rest = key_file[len("pkcs11://"):]
+        module_and_slot, _, label_and_query = rest.partition('/')
+        if not label_and_query:
+            raise PipeException(f"Malformed pkcs11 uri (missing object label): {key_file}")
+        # module path may carry an optional ":slot" suffix; the slot is selected
+        # automatically by pybergshamra (first slot with a token) so it is parsed
+        # off but not otherwise used here.
+        module_path, _, _slot = module_and_slot.partition(':')
+        label, _, query = label_and_query.partition('?')
+
+        pin_spec = "env:PYKCS11PIN"
+        if query:
+            for param in query.split('&'):
+                k, _, v = param.partition('=')
+                if k == 'pin':
+                    pin_spec = v
+        if pin_spec.startswith("env:"):
+            env_var = pin_spec[len("env:"):]
+            pin = os.environ.get(env_var)
+            if pin is None:
+                raise PipeException(f"PKCS#11 pin environment variable {env_var} is not set")
+        else:
+            pin = pin_spec
+
+        provider = pybergshamra.Pkcs11Provider(module_path)
+        session = provider.open_session(pin)
+        signer = pybergshamra.Pkcs11Signer(session, label, pybergshamra.Algorithm.RSA_SHA256)
+        ctx.set_hsm_signer(signer)
+    else:
+        # On-disk private key path.
+        key = pybergshamra.load_key_file(key_file)
+        mgr.add_key(key)
+
+    # Serialize the working document, build the enveloped signature, sign, and
+    # reparse so downstream pipes see a pyuppsala element again.
+    xml = etree.tostring(relt, encoding='unicode')
+    signed = pybergshamra.sign_enveloped(ctx, xml, reference_id=idattr, cert_pem=cert_pem)
+    req.t = root(etree.fromstring(signed))
 
     return req.t
 
@@ -1427,17 +1483,23 @@ def check_xml_namespaces(req: Plumbing.Request, *opts):
     if req.t is None:
         raise PipeException("Your pipeline is missing a select statement.")
 
-    def _verify(elt):
-        if isinstance(elt.tag, str):
-            for _prefix, uri in list(elt.nsmap.items()):
-                if not uri.startswith('urn:'):
-                    u = urlparse(uri)
-                    if u.scheme not in ('http', 'https'):
-                        raise MetadataException(
-                            f"Namespace URIs must be be http(s) URIs ('{uri}' declared on {elt.tag})"
-                        )
+    # The check's intent is O(distinct namespace URIs) (~5 in real metadata), but a naive
+    # per-element walk reads the full in-scope nsmap on every element, so the same handful of
+    # root-inherited namespaces get urlparse-d tens of thousands of times (165k urlparse calls on
+    # the SWAMID corpus). Dedupe: validate each distinct URI exactly once.
+    seen = set()
+    for elt in root(req.t).iter():
+        if not isinstance(elt.tag, str):
+            continue
+        for _prefix, uri in elt.nsmap.items():
+            if uri in seen:
+                continue
+            seen.add(uri)
+            if not uri.startswith('urn:') and urlparse(uri).scheme not in ('http', 'https'):
+                raise MetadataException(
+                    f"Namespace URIs must be http(s) URIs ('{uri}' declared on {elt.tag})"
+                )
 
-    with_tree(root(req.t), _verify)
     return req.t
 
 
@@ -1507,11 +1569,17 @@ def certreport(req: Plumbing.Request, *opts):
     error_bits = int(req.args.get('error_bits', "1024"))
     warning_bits = int(req.args.get('warning_bits', "2048"))
 
+    # One native pass: iterate entities directly and walk each (small) entity
+    # subtree for its certificates. The previous per-entity document-wide
+    # xpath (`md:EntityDescriptor[@entityID=...]//ds:X509Certificate`) was
+    # O(entities * document), and because annotate_entity mutates the tree
+    # between evaluations every xpath re-built the document's XPath indexes --
+    # unusably slow at eduGAIN scale (~10k entities).
+    x509_tag = "{{{}}}X509Certificate".format(NS['ds'])
     seen: dict[str, bool] = {}
-    for eid in req.t.xpath("//md:EntityDescriptor/@entityID", namespaces=NS, smart_strings=False):
-        for cd in req.t.xpath(
-            f"md:EntityDescriptor[@entityID='{eid}']//ds:X509Certificate", namespaces=NS, smart_strings=False
-        ):
+    for entity_elt in iter_entities(req.t):
+        eid = entity_elt.get('entityID')
+        for cd in entity_elt.iter(x509_tag):
             try:
                 cert_pem = cd.text
                 cert_der = base64.b64decode(cert_pem)
@@ -1520,46 +1588,53 @@ def certreport(req: Plumbing.Request, *opts):
                 fp = m.hexdigest()
                 if fp not in seen:
                     seen[fp] = True
-                    entity_elt = cd.getparent().getparent().getparent().getparent().getparent()
-                    cdict = xmlsec.utils.b642cert(cert_pem)
-                    keysize = cdict['modulus'].bit_length()
-                    cert = cdict['cert']
-                    if keysize < error_bits:
+                    # cert_info replaces xmlsec.utils.b642cert and exposes the
+                    # same fields the report needs: keysize (bits), subject, and
+                    # not_after (a datetime instead of the old raw string).
+                    cert = cert_info(cert_pem)
+                    subject = cert.subject
+                    keysize = cert.keysize
+                    if keysize is not None and keysize < error_bits:
                         annotate_entity(
                             entity_elt,
                             "certificate-error",
                             "keysize too small",
-                            f"{cert.getSubject()} has keysize of {keysize} bits (less than {error_bits})",
+                            f"{subject} has keysize of {keysize} bits (less than {error_bits})",
                         )
                         log.error(f"{eid} has keysize of {keysize}")
-                    elif keysize < warning_bits:
+                    elif keysize is not None and keysize < warning_bits:
                         annotate_entity(
                             entity_elt,
                             "certificate-warning",
                             "keysize small",
-                            f"{cert.getSubject()} has keysize of {keysize} bits (less than {warning_bits})",
+                            f"{subject} has keysize of {keysize} bits (less than {warning_bits})",
                         )
                         log.warning(f"{eid} has keysize of {keysize}")
 
-                    notafter = cert.getNotAfter()
+                    notafter = cert.not_after
                     if notafter is None:
                         annotate_entity(
                             entity_elt,
                             "certificate-error",
                             "certificate has no expiration time",
-                            f"{cert.getSubject()} has no expiration time",
+                            f"{subject} has no expiration time",
                         )
                     else:
                         try:
-                            et = datetime.strptime(f"{notafter}", "%y%m%d%H%M%SZ")
-                            now = datetime.now()
-                            dt = et - now
+                            # Compare against a "now" with matching awareness:
+                            # cryptography's not_valid_after_utc is tz-aware UTC,
+                            # while the deprecated not_valid_after is naive.
+                            if notafter.tzinfo is not None:
+                                now = utc_now()
+                            else:
+                                now = datetime.now()
+                            dt = notafter - now
                             if total_seconds(dt) < error_seconds:
                                 annotate_entity(
                                     entity_elt,
                                     "certificate-error",
                                     "certificate has expired",
-                                    f"{cert.getSubject()} expired {-dt} ago",
+                                    f"{subject} expired {-dt} ago",
                                 )
                                 log.error(f"{eid} expired {-dt} ago")
                             elif total_seconds(dt) < warning_seconds:
@@ -1567,15 +1642,15 @@ def certreport(req: Plumbing.Request, *opts):
                                     entity_elt,
                                     "certificate-warning",
                                     "certificate about to expire",
-                                    f"{cert.getSubject()} expires in {dt}",
+                                    f"{subject} expires in {dt}",
                                 )
                                 log.warning(f"{eid} expires in {dt}")
-                        except ValueError:
+                        except (ValueError, TypeError):
                             annotate_entity(
                                 entity_elt,
                                 "certificate-error",
                                 "certificate has unknown expiration time",
-                                f"{cert.getSubject()} unknown expiration time {notafter}",
+                                f"{subject} unknown expiration time {notafter}",
                             )
 
                     req.store.update(entity_elt)
@@ -1654,7 +1729,7 @@ def signcerts(req: Plumbing.Request, *opts):
     if req.t is None:
         raise PipeException("Your pipeline is missing a select statement.")
 
-    for fp, _pem in list(xmlsec.crypto.CertDict(req.t).items()):
+    for fp, _pem in list(cert_dict(req.t).items()):
         log.info(f"found signing cert with fingerprint {fp}")
     return req.t
 
