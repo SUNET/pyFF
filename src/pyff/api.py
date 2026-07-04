@@ -11,7 +11,7 @@ import pytz
 import requests
 from accept_types import AcceptableType
 from cachetools import TTLCache
-from lxml import etree
+from pyuppsala import etree
 from pyramid.config import Configurator
 from pyramid.events import NewRequest
 from pyramid.request import Request

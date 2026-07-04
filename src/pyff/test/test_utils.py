@@ -121,7 +121,10 @@ class TestXMLErrors(TestCase):
         errors = [':WARNING:', 'other']
         assert utils.xml_error(errors) == 'other'
         assert utils.xml_error(errors, m='other') == 'other'
-        assert utils.xml_error(errors, m='kaka') == ''
+        # pyuppsala's per-document validation errors don't embed the source, so
+        # xml_error now prefixes an error with the source (instead of dropping
+        # it) when the source isn't already mentioned -- keeping the detail.
+        assert utils.xml_error(errors, m='kaka') == 'kaka: other'
 
 
 class TestMisc(TestCase):
