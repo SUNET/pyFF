@@ -223,7 +223,10 @@ class LoadErrorTest(PipeLineTest):
             )
         except (MetadataException, ParserException) as ex:
             print(ex)
-            assert ":SCHEMASV:" in str(ex)
+            # pyuppsala reports schema-validation failures as pyFF's
+            # "Validation error while parsing ..." MetadataException (lxml's
+            # libxml2-specific ":SCHEMASV:" error code no longer applies).
+            assert "Validation error" in str(ex)
             assert "/metadata/test03-invalid.xml" in str(ex)
             return True
 

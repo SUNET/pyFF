@@ -1,18 +1,15 @@
 import json
 import traceback
 from base64 import b64decode
-from copy import deepcopy
 from datetime import datetime, timedelta
 from io import BytesIO
 from itertools import chain
 from typing import Any, Optional, Union
 
-from lxml import etree
-from lxml.builder import ElementMaker
-from lxml.etree import DocumentInvalid, Element, ElementTree
+from pyuppsala import etree
+from pyuppsala.etree import DocumentInvalid, Element, ElementTree
 from pydantic import Field
 from str2bool import str2bool
-from xmlsec.crypto import CertDict
 
 from pyff.constants import ATTRS, NF_URI, NS, config
 from pyff.exceptions import MetadataException
@@ -21,6 +18,7 @@ from pyff.parse import ParserInfo, PyffParser, add_parser
 from pyff.utils import (
     Lambda,
     b2u,
+    cert_dict,
     check_signature,
     datetime2iso,
     dumptree,
@@ -301,7 +299,7 @@ class MDServiceListParser(PyffParser):
             for ml in mdl.iter("{{{}}}MetadataLocation".format(NS['ser'])):
                 location = ml.get('Location')
                 if location:
-                    certs = CertDict(ml)
+                    certs = cert_dict(ml)
                     fingerprints = list(certs.keys())
                     fp = None
                     if len(fingerprints) > 0:
@@ -483,10 +481,11 @@ def entitiesdescriptor(
         attrs['validUntil'] = valid_until
     t = etree.Element("{{{}}}EntitiesDescriptor".format(NS['md']), **attrs)
     for entity in entities:
-        ent_insert = entity
-        if copy:
-            ent_insert = deepcopy(ent_insert)
-        t.append(ent_insert)
+        # pyuppsala's cross-tree append deep-copies the subtree into the target document (via the
+        # native import_subtree) and never mutates the source, unlike lxml which moves the node.
+        # So the explicit deepcopy(entity) here would be a redundant second clone (serialize +
+        # reparse per entity) on the pyuppsala backend; append alone already protects the source.
+        t.append(entity)
 
     if config.devel_write_xml_to_file:
         import os
@@ -1271,12 +1270,30 @@ def annotate_entity(e, category, title, message, source=None):
     if e.tag != "{{{}}}EntityDescriptor".format(NS['md']) and e.tag != "{{{}}}EntitiesDescriptor".format(NS['md']):
         raise MetadataException('I can only annotate EntityDescriptor or EntitiesDescriptor elements')
     subject = e.get('Name', e.get('entityID', None))
-    atom = ElementMaker(nsmap={'atom': 'http://www.w3.org/2005/Atom'}, namespace='http://www.w3.org/2005/Atom')
-    args = [atom.published(f"{datetime.now().isoformat()}"), atom.link(href=subject, rel="saml-metadata-subject")]
+    # Build the ATOM <entry> annotation directly with pyuppsala.etree elements
+    # (replacing lxml.builder.ElementMaker). All elements live in the ATOM
+    # namespace; the entry carries an "atom" prefix declaration via nsmap so the
+    # serialized output stays prefixed. The structure (published, link(s), title,
+    # category, content) mirrors the original ElementMaker construction.
+    atom_ns = 'http://www.w3.org/2005/Atom'
+
+    def _atom(parent, local_name, text=None, **attrib):
+        elt = etree.SubElement(parent, "{{{}}}{}".format(atom_ns, local_name))
+        if text is not None:
+            elt.text = text
+        for k, v in attrib.items():
+            elt.set(k, v)
+        return elt
+
+    entry = etree.Element("{{{}}}entry".format(atom_ns), nsmap={'atom': atom_ns})
+    _atom(entry, 'published', text=f"{datetime.now().isoformat()}")
+    _atom(entry, 'link', href=subject, rel="saml-metadata-subject")
     if source is not None:
-        args.append(atom.link(href=source, rel="saml-metadata-source"))
-    args.extend([atom.title(title), atom.category(term=category), atom.content(message, type="text/plain")])
-    entity_extensions(e).append(atom.entry(*args))
+        _atom(entry, 'link', href=source, rel="saml-metadata-source")
+    _atom(entry, 'title', text=title)
+    _atom(entry, 'category', term=category)
+    _atom(entry, 'content', text=message, type="text/plain")
+    entity_extensions(e).append(entry)
 
 
 def _entity_attributes(e):
@@ -1290,16 +1307,20 @@ def _entity_attributes(e):
 
 def _eattribute(e, attr, nf):
     ea = _entity_attributes(e)
-    a = ea.xpath(
-        f".//saml:Attribute[@NameFormat='{nf}' and @Name='{attr}']", namespaces=NS, smart_strings=False
-    )
-    if a is None or len(a) == 0:
-        a = etree.Element("{{{}}}Attribute".format(NS['saml']))
-        a.set('NameFormat', nf)
-        a.set('Name', attr)
-        ea.append(a)
-    else:
-        a = a[0]
+    # Search the (tiny) EntityAttributes subtree directly instead of via
+    # .xpath(): an XPath evaluation must (re)build document-wide attribute
+    # indexes after every tree mutation, and set_entity_attributes mutates
+    # between calls, so the mutate->xpath->mutate loop over N entities cost
+    # O(N * document) rebuilds. A plain subtree walk is O(subtree) and needs
+    # no index at all.
+    saml_attribute = "{{{}}}Attribute".format(NS['saml'])
+    for a in ea.iter(saml_attribute):
+        if a.get('NameFormat') == nf and a.get('Name') == attr:
+            return a
+    a = etree.Element(saml_attribute)
+    a.set('NameFormat', nf)
+    a.set('Name', attr)
+    ea.append(a)
     return a
 
 
