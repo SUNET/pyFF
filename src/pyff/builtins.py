@@ -433,7 +433,7 @@ def info(req: Plumbing.Request, *opts):
     if req.t is None:
         raise PipeException("Your pipeline is missing a select statement.")
 
-    for e in req.t.xpath("//md:EntityDescriptor", namespaces=NS, smart_strings=False):
+    for e in iter_entities(req.t):
         print(e.get('entityID'))
     return req.t
 
@@ -554,9 +554,12 @@ def publish(req: Plumbing.Request, *opts):
     out = output_file
     data = req.t
 
-    # clean unused namespaces - the working document isn't always XML (eg discojson* produce JSON)
-    if isinstance(data, (etree._Element, etree._ElementTree)):
-        etree.cleanup_namespaces(data)
+    # Clean unused namespaces when the XML backend supports it. pyuppsala
+    # currently serializes namespace declarations as-is and has no equivalent
+    # to lxml.etree.cleanup_namespaces().
+    cleanup_namespaces = getattr(etree, 'cleanup_namespaces', None)
+    if cleanup_namespaces is not None and isinstance(data, (etree._Element, etree._ElementTree)):
+        cleanup_namespaces(data)
 
     if not req.args.get('raw'):
         data = dumptree(req.t, pretty_print=req.args.get('pretty_print'))
@@ -1267,13 +1270,12 @@ def stats(req: Plumbing.Request, *opts):
         raise PipeException("Unable to call stats on non-XML")
 
     if req.t is not None:
-        print("selected:       {:d}".format(len(req.t.xpath("//md:EntityDescriptor", namespaces=NS))))
-        print(
-            "          idps: {:d}".format(len(req.t.xpath("//md:EntityDescriptor[md:IDPSSODescriptor]", namespaces=NS)))
-        )
-        print(
-            "           sps: {:d}".format(len(req.t.xpath("//md:EntityDescriptor[md:SPSSODescriptor]", namespaces=NS)))
-        )
+        entities = list(iter_entities(req.t))
+        idp_descriptor = "{{{}}}IDPSSODescriptor".format(NS['md'])
+        sp_descriptor = "{{{}}}SPSSODescriptor".format(NS['md'])
+        print("selected:       {:d}".format(len(entities)))
+        print("          idps: {:d}".format(sum(e.find(idp_descriptor) is not None for e in entities)))
+        print("           sps: {:d}".format(sum(e.find(sp_descriptor) is not None for e in entities)))
     print("---")
     return req.t
 

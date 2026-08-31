@@ -6,9 +6,9 @@ from io import BytesIO
 from itertools import chain
 from typing import Any, Optional, Union
 
+from pydantic import Field
 from pyuppsala import etree
 from pyuppsala.etree import DocumentInvalid, Element, ElementTree
-from pydantic import Field
 from str2bool import str2bool
 
 from pyff.constants import ATTRS, NF_URI, NS, config
