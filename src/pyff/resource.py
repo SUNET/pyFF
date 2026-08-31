@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import quote as urlescape
 
 import requests
-from pyuppsala.etree import ElementTree
 from pydantic import BaseModel, ConfigDict, Field
+from pyuppsala.etree import ElementTree
 from requests.adapters import Response
 
 from pyff.constants import config

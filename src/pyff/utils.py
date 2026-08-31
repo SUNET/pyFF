@@ -298,6 +298,7 @@ def check_signature(t: ElementTree, key: Optional[str], only_one_signature: bool
         # self-signed and would otherwise fail to chain to a trusted root.
         pinned_fingerprint = key.replace(':', '').replace(' ', '').strip().lower()
         ctx.enabled_key_data_x509 = True
+        ctx.trusted_keys_only = False
         ctx.insecure = True
     else:
         # Trusted-cert path: load the PEM certificate and require it as the

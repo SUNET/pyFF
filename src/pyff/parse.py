@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from pyff.constants import NS
 from pyff.logs import get_log
 from pyff.resource import Resource, ResourceInfo
+
 # cert_dict replaces xmlsec.crypto.CertDict (fingerprint -> cert mapping).
 from pyff.utils import cert_dict, find_matching_files, parse_xml, root, unicode_stream, utc_now
 

@@ -26,39 +26,17 @@ from pyff.constants import NS
 from pyff.decorators import deprecated
 from pyff.exceptions import MetadataException
 from pyff.logs import get_log
-from pyff.pipes import PipeException, PipelineCallback, Plumbing, pipe, registry
-from pyff.samlmd import (
-    annotate_entity,
-    discojson_sp_attr_t,
-    discojson_sp_t,
-    discojson_t,
-    entitiesdescriptor,
-    find_in_document,
-    iter_entities,
-    resolve_entities,
-    set_entity_attributes,
-    set_nodecountry,
-    set_pubinfo,
-    set_reginfo,
-    sort_entities,
-)
-from pyff.utils import (
-    cert_dict,
-    cert_info,
-    datetime2iso,
-    dumptree,
-    duration2timedelta,
-    hash_id,
-    iso2datetime,
-    parse_xml,
-    root,
-    safe_write,
-    total_seconds,
-    utc_now,
-    validate_document,
-    with_tree,
-    xslt_transform,
-)
+from pyff.pipes import (PipeException, PipelineCallback, Plumbing, pipe,
+                        registry)
+from pyff.samlmd import (annotate_entity, discojson_sp_attr_t, discojson_sp_t,
+                         discojson_t, entitiesdescriptor, find_in_document,
+                         iter_entities, resolve_entities,
+                         set_entity_attributes, set_nodecountry, set_pubinfo,
+                         set_reginfo, sort_entities)
+from pyff.utils import (cert_dict, cert_info, datetime2iso, dumptree,
+                        duration2timedelta, hash_id, iso2datetime, parse_xml,
+                        root, safe_write, total_seconds, utc_now,
+                        validate_document, with_tree, xslt_transform)
 
 __author__ = 'leifj'
 
@@ -433,7 +411,7 @@ def info(req: Plumbing.Request, *opts):
     if req.t is None:
         raise PipeException("Your pipeline is missing a select statement.")
 
-    for e in req.t.xpath("//md:EntityDescriptor", namespaces=NS, smart_strings=False):
+    for e in iter_entities(req.t):
         print(e.get('entityID'))
     return req.t
 
@@ -1263,13 +1241,12 @@ def stats(req: Plumbing.Request, *opts):
         raise PipeException("Unable to call stats on non-XML")
 
     if req.t is not None:
-        print("selected:       {:d}".format(len(req.t.xpath("//md:EntityDescriptor", namespaces=NS))))
-        print(
-            "          idps: {:d}".format(len(req.t.xpath("//md:EntityDescriptor[md:IDPSSODescriptor]", namespaces=NS)))
-        )
-        print(
-            "           sps: {:d}".format(len(req.t.xpath("//md:EntityDescriptor[md:SPSSODescriptor]", namespaces=NS)))
-        )
+        entities = list(iter_entities(req.t))
+        idp_descriptor = "{{{}}}IDPSSODescriptor".format(NS['md'])
+        sp_descriptor = "{{{}}}SPSSODescriptor".format(NS['md'])
+        print("selected:       {:d}".format(len(entities)))
+        print("          idps: {:d}".format(sum(e.find(idp_descriptor) is not None for e in entities)))
+        print("           sps: {:d}".format(sum(e.find(sp_descriptor) is not None for e in entities)))
     print("---")
     return req.t
 
