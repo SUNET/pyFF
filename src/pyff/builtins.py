@@ -721,6 +721,12 @@ def load(req: Plumbing.Request, *opts):
         max_workers=int(_opts['max_workers']),
     )
 
+    # Resource trees are only an intermediate representation for loading and
+    # watcher callbacks. The store has its own entity copies after reload; keep
+    # the resource graph/metadata but release large parsed source documents.
+    for resource in req.md.rm.walk():
+        resource.t = None
+
 
 def _select_args(req):
     args = req.args
@@ -1235,11 +1241,22 @@ def sign(req: Plumbing.Request, *_opts):
         key = pybergshamra.load_key_file(key_file)
         mgr.add_key(key)
 
-    # Serialize the working document, build the enveloped signature, sign, and
-    # reparse so downstream pipes see a pyuppsala element again.
-    xml = etree.tostring(relt, encoding='unicode')
-    signed = pybergshamra.sign_enveloped(ctx, xml, reference_id=idattr, cert_pem=cert_pem)
-    req.t = root(etree.fromstring(signed))
+    if hasattr(pybergshamra, 'sign_enveloped_document') and hasattr(etree, 'native_document'):
+        # Sign the working tree in place through the shared native DOM
+        # (pyuppsala document handle). This avoids serializing the whole
+        # aggregate, the signer's internal re-parses, and the reparse of the
+        # signed result -- downstream pipes keep the very same tree, with the
+        # <ds:Signature> inserted as the root's first child.
+        doc = etree.native_document(relt)
+        pybergshamra.sign_enveloped_document(ctx, doc, reference_id=idattr, cert_pem=cert_pem)
+        req.t = relt
+    else:
+        # Older pybergshamra without the document API: serialize the working
+        # document, build the enveloped signature, sign, and reparse so
+        # downstream pipes see a pyuppsala element again.
+        xml = etree.tostring(relt, encoding='unicode')
+        signed = pybergshamra.sign_enveloped(ctx, xml, reference_id=idattr, cert_pem=cert_pem)
+        req.t = root(etree.fromstring(signed))
 
     return req.t
 
@@ -1270,12 +1287,25 @@ def stats(req: Plumbing.Request, *opts):
         raise PipeException("Unable to call stats on non-XML")
 
     if req.t is not None:
-        entities = list(iter_entities(req.t))
         idp_descriptor = "{{{}}}IDPSSODescriptor".format(NS['md'])
         sp_descriptor = "{{{}}}SPSSODescriptor".format(NS['md'])
-        print("selected:       {:d}".format(len(entities)))
-        print("          idps: {:d}".format(sum(e.find(idp_descriptor) is not None for e in entities)))
-        print("           sps: {:d}".format(sum(e.find(sp_descriptor) is not None for e in entities)))
+        fast_count = getattr(req.t, 'fast_count', None)
+        if fast_count is not None:
+            # Native subtree counts: no Python proxy per entity. These count
+            # role descriptor elements, which equals the entities-with-role
+            # count below except for the rare entity that carries two
+            # same-type role descriptors (e.g. per protocolSupportEnumeration).
+            selected = fast_count("{{{}}}EntityDescriptor".format(NS['md']))
+            idps = fast_count(idp_descriptor)
+            sps = fast_count(sp_descriptor)
+        else:
+            entities = list(iter_entities(req.t))
+            selected = len(entities)
+            idps = sum(e.find(idp_descriptor) is not None for e in entities)
+            sps = sum(e.find(sp_descriptor) is not None for e in entities)
+        print("selected:       {:d}".format(selected))
+        print("          idps: {:d}".format(idps))
+        print("           sps: {:d}".format(sps))
     print("---")
     return req.t
 

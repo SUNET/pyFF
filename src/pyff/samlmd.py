@@ -623,6 +623,19 @@ def with_entity_attributes(entity, cb):
         if e.text is not None:
             return e.text.strip()
 
+    # pyuppsala can collect the (Name, [AttributeValue text...]) groups natively
+    # in one pass without creating a Python proxy per node.
+    fast_collect = getattr(entity, 'fast_collect_grouped_text', None)
+    if fast_collect is not None:
+        for an, values in fast_collect(
+            "{{{}}}EntityAttributes".format(NS['mdattr']),
+            "{{{}}}Attribute".format(NS['saml']),
+            'Name',
+            "{{{}}}AttributeValue".format(NS['saml']),
+        ):
+            cb(an, values)
+        return
+
     for ea in entity.iter("{{{}}}EntityAttributes".format(NS['mdattr'])):
         for a in ea.iter("{{{}}}Attribute".format(NS['saml'])):
             an = a.get('Name', None)
