@@ -54,6 +54,15 @@ from pyff.logs import get_log
 # explicitly allowed) and exposes no set_default_parser hook, so the previous
 # call to etree.set_default_parser(...) has been dropped during the migration.
 
+# pyuppsala's default XPath node-visit budget (100k visits per evaluation) is an
+# anti-DoS cap sized for untrusted documents. pyFF evaluates XPath over its own
+# working aggregates, which at eduGAIN scale exceed a million nodes, so a plain
+# //md:EntityDescriptor would trip the default cap. Raise the module budget to a
+# value comfortably above real-world aggregate sizes while still bounding a
+# runaway evaluation.
+if hasattr(etree, 'MAX_XPATH_NODE_VISITS'):
+    etree.MAX_XPATH_NODE_VISITS = max(etree.MAX_XPATH_NODE_VISITS, 50_000_000)
+
 __author__ = 'leifj'
 
 log = get_log(__name__)
@@ -308,12 +317,18 @@ def check_signature(t: ElementTree, key: Optional[str], only_one_signature: bool
         mgr.add_key(cert_key)
         ctx.trusted_keys_only = True
 
-    # pybergshamra works on serialized XML, so render the working tree to a string.
-    xml = dumptree(root(t), xml_declaration=False)
-    if isinstance(xml, bytes):
-        xml = xml.decode('utf-8')
-
-    result = pybergshamra.verify(ctx, xml)
+    if hasattr(pybergshamra, 'verify_document') and hasattr(etree, 'native_document'):
+        # Verify directly against the shared native DOM (pyuppsala document
+        # handle): no serialization of the working tree and no re-parse
+        # inside the verifier.
+        result = pybergshamra.verify_document(ctx, etree.native_document(root(t)))
+    else:
+        # Older pybergshamra works on serialized XML, so render the working
+        # tree to a string.
+        xml = dumptree(root(t), xml_declaration=False)
+        if isinstance(xml, bytes):
+            xml = xml.decode('utf-8')
+        result = pybergshamra.verify(ctx, xml)
     if not result.is_valid:
         raise MetadataException(f"Signature verification failed: {result.reason}")
 
@@ -676,6 +691,14 @@ def parse_xml(io: BinaryIO, base_url: Optional[str] = None) -> ElementTree:
 
 
 def has_tag(t, tag):
+    # pyuppsala elements expose native subtree probes that avoid materializing
+    # Python element proxies; fall back to a lazy iter for other backends.
+    fast_has = getattr(t, 'fast_has', None)
+    if fast_has is not None:
+        return fast_has(tag)
+    fast_count = getattr(t, 'fast_count', None)
+    if fast_count is not None:
+        return fast_count(tag) > 0
     tags = t.iter(tag)
     return next(tags, sentinel) is not sentinel
 
