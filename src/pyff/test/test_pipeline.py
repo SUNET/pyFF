@@ -379,6 +379,51 @@ class SigningTest(PipeLineTest):
         assert 'https://skriptenforum.net/shibboleth' in eIDs
         os.unlink(self.output)
 
+    def test_signing_single_entity(self):
+        # Regression test for the MDQ single-entity path: after `first` the
+        # working document is an EntityDescriptor that is still a child of the
+        # selected EntitiesDescriptor. `sign` must sign *that* element (and
+        # `publish`/`emit` must carry the signature), not the enclosing
+        # aggregate root that later gets thrown away.
+        from pyff.constants import NS
+        from pyff.utils import check_signature
+        from pyuppsala import etree
+
+        self.output = tempfile.NamedTemporaryFile('w').name
+        res, _md = self.exec_pipeline(
+            f"""
+- load:
+    - {self.datadir}/simple-pipeline
+- select:
+    - https://idp.aco.net/idp/shibboleth
+- first
+- finalize:
+    cacheDuration: PT5H
+    validUntil: P10D
+- sign:
+    key: {self.private_keyspec}
+    cert: {self.public_keyspec}
+- publish:
+    output: {self.output}
+"""
+        )
+        entity_tag = "{{{}}}EntityDescriptor".format(NS['md'])
+        signature_tag = "{{{}}}Signature".format(NS['ds'])
+
+        t = root(res)
+        assert t.tag == entity_tag
+        assert t.get('entityID') == 'https://idp.aco.net/idp/shibboleth'
+        assert len(t) > 0 and t[0].tag == signature_tag, "signature must be the entity's first child"
+        assert t.get('ID') is not None
+        check_signature(t, self.public_keyspec, only_one_signature=True)
+
+        with open(self.output, 'rb') as fd:
+            published = etree.fromstring(fd.read())
+        assert published.tag == entity_tag
+        assert published[0].tag == signature_tag, "published single entity must carry its signature"
+        check_signature(published, self.public_keyspec, only_one_signature=True)
+        os.unlink(self.output)
+
     def test_signing_and_validation(self):
         self.output = tempfile.NamedTemporaryFile('w').name
         _res_s, _md_s, _ctx_s = self.run_pipeline("signer.fd", self)

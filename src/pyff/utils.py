@@ -317,15 +317,21 @@ def check_signature(t: ElementTree, key: Optional[str], only_one_signature: bool
         mgr.add_key(cert_key)
         ctx.trusted_keys_only = True
 
-    if hasattr(pybergshamra, 'verify_document') and hasattr(etree, 'native_document'):
+    relt = root(t)
+    if (
+        hasattr(pybergshamra, 'verify_document')
+        and hasattr(etree, 'native_document')
+        and is_document_root(relt)
+    ):
         # Verify directly against the shared native DOM (pyuppsala document
         # handle): no serialization of the working tree and no re-parse
-        # inside the verifier.
-        result = pybergshamra.verify_document(ctx, etree.native_document(root(t)))
+        # inside the verifier. Only valid when ``relt`` *is* the document --
+        # for a subtree the native document would be the enclosing aggregate.
+        result = pybergshamra.verify_document(ctx, etree.native_document(relt))
     else:
-        # Older pybergshamra works on serialized XML, so render the working
-        # tree to a string.
-        xml = dumptree(root(t), xml_declaration=False)
+        # Older pybergshamra, or a subtree of a larger document: render the
+        # working tree to a string and verify that.
+        xml = dumptree(relt, xml_declaration=False)
         if isinstance(xml, bytes):
             xml = xml.decode('utf-8')
         result = pybergshamra.verify(ctx, xml)
@@ -508,6 +514,28 @@ def root(t):
         return t.getroot()
     else:
         return t
+
+
+def is_document_root(elt) -> bool:
+    """Return True if ``elt`` is the root element of its owning document.
+
+    The working document is frequently a *subtree* of a larger parsed document,
+    e.g. the single EntityDescriptor that ``first`` hands on after an MDQ
+    ``select`` (it is still a child of the loaded EntitiesDescriptor). Anything
+    that reaches the native document through ``etree.native_document(elt)``
+    would then operate on the whole aggregate instead of ``elt``, so callers
+    must only take the document-native shortcut when this returns True. A
+    ``deepcopy``'d element has no parent but is not a document root either,
+    which is why the root-tree identity check is used rather than
+    ``getparent() is None``.
+    """
+    getroottree = getattr(elt, 'getroottree', None)
+    if getroottree is None:
+        return False
+    try:
+        return getroottree().getroot() is elt
+    except Exception:  # pragma: no cover - be conservative, fall back to the string path
+        return False
 
 
 def with_tree(elt, cb):
