@@ -34,9 +34,10 @@ from pyff.samlmd import (annotate_entity, discojson_sp_attr_t, discojson_sp_t,
                          set_entity_attributes, set_nodecountry, set_pubinfo,
                          set_reginfo, sort_entities)
 from pyff.utils import (cert_dict, cert_info, datetime2iso, dumptree,
-                        duration2timedelta, hash_id, iso2datetime, parse_xml,
-                        root, safe_write, total_seconds, utc_now,
-                        validate_document, with_tree, xslt_transform)
+                        duration2timedelta, hash_id, is_document_root,
+                        iso2datetime, parse_xml, root, safe_write,
+                        total_seconds, utc_now, validate_document, with_tree,
+                        xslt_transform)
 
 __author__ = 'leifj'
 
@@ -1212,19 +1213,31 @@ def sign(req: Plumbing.Request, *_opts):
         key = pybergshamra.load_key_file(key_file)
         mgr.add_key(key)
 
-    if hasattr(pybergshamra, 'sign_enveloped_document') and hasattr(etree, 'native_document'):
+    if (
+        hasattr(pybergshamra, 'sign_enveloped_document')
+        and hasattr(etree, 'native_document')
+        and is_document_root(relt)
+    ):
         # Sign the working tree in place through the shared native DOM
         # (pyuppsala document handle). This avoids serializing the whole
         # aggregate, the signer's internal re-parses, and the reparse of the
         # signed result -- downstream pipes keep the very same tree, with the
         # <ds:Signature> inserted as the root's first child.
+        #
+        # Only valid when ``relt`` is the document root. After ``first`` (an
+        # MDQ single-entity request) the working document is an
+        # EntityDescriptor that is still a child of the loaded aggregate; the
+        # native document would then be the whole aggregate and the signature
+        # would land on the discarded EntitiesDescriptor, leaving the emitted
+        # entity unsigned.
         doc = etree.native_document(relt)
         pybergshamra.sign_enveloped_document(ctx, doc, reference_id=idattr, cert_pem=cert_pem)
         req.t = relt
     else:
-        # Older pybergshamra without the document API: serialize the working
-        # document, build the enveloped signature, sign, and reparse so
-        # downstream pipes see a pyuppsala element again.
+        # Older pybergshamra without the document API, or a subtree of a
+        # larger document (small, so the string round trip is cheap):
+        # serialize the working document, build the enveloped signature, sign,
+        # and reparse so downstream pipes see a standalone pyuppsala element.
         xml = etree.tostring(relt, encoding='unicode')
         signed = pybergshamra.sign_enveloped(ctx, xml, reference_id=idattr, cert_pem=cert_pem)
         req.t = root(etree.fromstring(signed))
