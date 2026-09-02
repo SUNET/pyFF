@@ -902,11 +902,11 @@ wheels = [
 
 [[package]]
 name = "pybergshamra"
-version = "0.8.0"
+version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/fa/3e/d6df088368fd8b96c479e16b7b5a336375e759b0f642d609c215a1921937/pybergshamra-0.8.0.tar.gz", hash = "sha256:edd2d2eb5430eccaff4865327f09074d66fd9ec236e297468be56043918725df", size = 107816, upload-time = "2026-08-01T20:49:28.617Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8d/0c/b93b0bf8c88ac25c4796fe43d43a31749ec55e3c61387a5cdab060868278/pybergshamra-0.8.1.tar.gz", hash = "sha256:a8867aed86a7541e6b844d9d5ee94ceac3899654a0aa72906872c84a9f9a54eb", size = 109140, upload-time = "2026-09-01T20:23:03.927Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7d/76/341d8673989a39837ff2cc2cf49b4d1ce7201070371fe780b016212ea1b1/pybergshamra-0.8.0-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:0c94c2b38a42dfaa373ca16546a87a54514644f23f29c662715836845e86c985", size = 2301221, upload-time = "2026-08-01T20:49:26.994Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/f9/ef10d75070068f92e9d1e4b964d5b9d233535e0c94e4feb88f8680fe96f5/pybergshamra-0.8.1-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:d692f53e9ee95136a19134eb9241f40f289f458b7ccf572cf25cb22e91ebee3c", size = 2304589, upload-time = "2026-09-01T20:23:02.399Z" },
 ]
 
 [[package]]
@@ -1123,12 +1123,12 @@ requires-dist = [
     { name = "gunicorn", specifier = ">=23.0.0" },
     { name = "gunicorn", marker = "python_full_version >= '3.10'", specifier = "==25.0.3" },
     { name = "mako", specifier = ">=1.3.10" },
-    { name = "pybergshamra", specifier = ">=0.7.0" },
+    { name = "pybergshamra", specifier = ">=0.8.1" },
     { name = "pyconfig", specifier = ">=3.2.3,<3.3.0" },
     { name = "pydantic", specifier = ">=2.8" },
     { name = "pyramid", specifier = ">=2.0.2" },
     { name = "pytz", specifier = ">=2025.2" },
-    { name = "pyuppsala", specifier = ">=0.9.0" },
+    { name = "pyuppsala", specifier = ">=0.10.0" },
     { name = "pyyaml", specifier = ">=3.10" },
     { name = "redis", specifier = ">=5.3.0" },
     { name = "redis-collections", specifier = ">=0.13.0" },
