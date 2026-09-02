@@ -427,6 +427,42 @@ class TestPkcs11SigningConfig:
         assert provider is selected_provider
         provider_type.with_slot_id.assert_called_once_with("/usr/lib/libCryptoki2_64.so", 17)
 
+    def test_pkcs11_signing_uses_owned_document(self):
+        """Keep PKCS#11 signing away from the shared native document capsule."""
+        from pyuppsala import etree
+
+        xml = """\
+<md:EntitiesDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata">
+  <md:EntityDescriptor entityID="https://sp.example.org/metadata"/>
+</md:EntitiesDescriptor>
+"""
+        md = MDRepository()
+        req = Plumbing.Request(
+            Plumbing([], pid="pkcs11-owned-document"),
+            md,
+            t=etree.fromstring(xml),
+            args={
+                "key": "pkcs11:///usr/lib/libCryptoki2_64.so/sctest2",
+                "token_label": "sc_ha",
+            },
+        )
+        provider_type = MagicMock()
+
+        with (
+            patch.dict(os.environ, {"PYKCS11PIN": "secret"}),
+            patch.object(builtins.pybergshamra, 'KeysManager', MagicMock()),
+            patch.object(builtins.pybergshamra, 'DsigContext', MagicMock()),
+            patch.object(builtins.pybergshamra, 'Pkcs11Provider', provider_type),
+            patch.object(builtins.pybergshamra, 'Pkcs11Signer', MagicMock()),
+            patch.object(builtins.pybergshamra, 'sign_enveloped', side_effect=lambda _ctx, value, **_kw: value) as sign,
+            patch.object(builtins.pybergshamra, 'sign_enveloped_document') as sign_document,
+        ):
+            result = builtins.sign(req)
+
+        sign.assert_called_once()
+        sign_document.assert_not_called()
+        assert result.find("{urn:oasis:names:tc:SAML:2.0:metadata}EntityDescriptor") is not None
+
     @pytest.mark.parametrize(
         "kwargs, message",
         [
@@ -445,11 +481,24 @@ class TestPkcs11SigningConfig:
 # noinspection PyUnresolvedReferences
 class SigningTest(PipeLineTest):
     def test_signing(self):
+        """Sign and publish an aggregate without losing its entities."""
+        from pyuppsala import etree
+
+        from pyff.constants import NS
+
         self.output = tempfile.NamedTemporaryFile('w').name
-        _res, md, _ctx = self.run_pipeline("signer.fd", self)
+        res, md, _ctx = self.run_pipeline("signer.fd", self)
         eIDs = [e.get('entityID') for e in md.store]
         assert 'https://idp.aco.net/idp/shibboleth' in eIDs
         assert 'https://skriptenforum.net/shibboleth' in eIDs
+
+        entity_tag = "{{{}}}EntityDescriptor".format(NS['md'])
+        signed_tree = root(res)
+        assert len(signed_tree.findall(entity_tag)) == 2
+
+        with open(self.output, 'rb') as fd:
+            published = etree.fromstring(fd.read())
+        assert len(published.findall(entity_tag)) == 2
         os.unlink(self.output)
 
     def test_signing_single_entity(self):

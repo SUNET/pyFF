@@ -1290,7 +1290,8 @@ def sign(req: Plumbing.Request, *_opts):
     mgr = pybergshamra.KeysManager()
     ctx = pybergshamra.DsigContext(mgr)
 
-    if key_file.startswith("pkcs11:"):
+    is_pkcs11_key = key_file.startswith("pkcs11:")
+    if is_pkcs11_key:
         # HSM signing via PKCS#11. The URI form is:
         #   pkcs11://<module path>[:slot]/<label>[?pin=<pin>]
         # where pin may be "env:VARNAME" (default env:PYKCS11PIN).
@@ -1319,7 +1320,8 @@ def sign(req: Plumbing.Request, *_opts):
         mgr.add_key(key)
 
     if (
-        hasattr(pybergshamra, 'sign_enveloped_document')
+        not is_pkcs11_key
+        and hasattr(pybergshamra, 'sign_enveloped_document')
         and hasattr(etree, 'native_document')
         and is_document_root(relt)
     ):
@@ -1328,6 +1330,13 @@ def sign(req: Plumbing.Request, *_opts):
         # aggregate, the signer's internal re-parses, and the reparse of the
         # signed result -- downstream pipes keep the very same tree, with the
         # <ds:Signature> inserted as the root's first child.
+        #
+        # PKCS#11 signing deliberately uses the owned-string path below. In
+        # production, mutating a live pyuppsala aggregate through the native
+        # document capsule while a vendor PKCS#11 module signs has caused
+        # worker SIGSEGVs and partially serialized aggregates. Keeping the HSM
+        # operation on an owned document avoids that unsafe integration
+        # boundary while preserving the native fast path for software keys.
         #
         # Only valid when ``relt`` is the document root. After ``first`` (an
         # MDQ single-entity request) the working document is an
