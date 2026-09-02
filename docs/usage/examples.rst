@@ -223,6 +223,25 @@ the Signature object.
     - publish: /tmp/idp.xml
     - stats
 
+If the PKCS#11 library exposes several initialized tokens, select one explicitly
+by its token label and, when labels are duplicated, its serial number. For
+example, a Luna HA client configured by ``/etc/Chrystoki.conf`` can use:
+
+.. code-block:: yaml
+
+    - sign:
+        key: pkcs11:///usr/lib/libCryptoki2_64.so/sctest2
+        token_label: sc_ha
+        token_serial: "11429933786539"
+        cert: /etc/credentials/sc-test-md-signer.crt
+
+``token_serial`` is optional when ``token_label`` uniquely identifies the
+token. Alternatively, use ``slot_id`` or the historical ``:slot`` URI suffix,
+for example ``pkcs11:///usr/lib/libCryptoki2_64.so:17/sctest2``. Do not combine
+a slot selector with ``token_label`` or ``token_serial``. The token label selects
+the HSM token; the final URI component (``sctest2`` above) selects the key object
+within that token.
+
 Running this example requires some preparation. Run the 'p11setup.sh' script in the examples directory.
 This results in a SoftHSM token being setup with the PIN 'secret1' and SO_PIN 'secret2'. Now run pyFF (assuming
 you are using a unix-like environment).
@@ -230,5 +249,4 @@ you are using a unix-like environment).
 .. code-block:: bash
 
     # env PYKCS11PIN=secret1 SOFTHSM_CONF=softhsm.conf pyff --loglevel=DEBUG p11.fd
-
 

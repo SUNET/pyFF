@@ -3,7 +3,7 @@ import os
 import shutil
 import tempfile
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -369,6 +369,79 @@ class SortTest(PipeLineTest):
         self._run_sort_test(expected_order, sxp, res, self.captured_log_text)
 
 
+class TestPkcs11SigningConfig:
+    """Verify parsing and validation of PKCS#11 signing selectors."""
+
+    def test_parse_absolute_module_path(self):
+        """Preserve an absolute module path and read the PIN environment selector."""
+        module, label, pin, slot_id = builtins._parse_pkcs11_key_uri(
+            "pkcs11:///usr/lib/libCryptoki2_64.so/sctest2?pin=env:LUNA_PIN"
+        )
+
+        assert module == "/usr/lib/libCryptoki2_64.so"
+        assert label == "sctest2"
+        assert pin == "env:LUNA_PIN"
+        assert slot_id is None
+
+    def test_parse_uri_slot_id(self):
+        """Extract a numeric slot ID appended to the module path."""
+        module, label, pin, slot_id = builtins._parse_pkcs11_key_uri(
+            "pkcs11:///usr/lib/libCryptoki2_64.so:17/sctest2"
+        )
+
+        assert module == "/usr/lib/libCryptoki2_64.so"
+        assert label == "sctest2"
+        assert pin == "env:PYKCS11PIN"
+        assert slot_id == 17
+
+    def test_select_token_by_label_and_serial(self):
+        """Select a token using its label and exact serial number."""
+        provider_type = MagicMock()
+        selected_provider = provider_type.with_token.return_value
+
+        with patch.object(builtins.pybergshamra, 'Pkcs11Provider', provider_type):
+            provider = builtins._select_pkcs11_provider(
+                "/usr/lib/libCryptoki2_64.so",
+                token_label="sc_ha",
+                token_serial=11429933786539,
+            )
+
+        assert provider is selected_provider
+        provider_type.with_token.assert_called_once_with(
+            "/usr/lib/libCryptoki2_64.so",
+            "sc_ha",
+            token_serial="11429933786539",
+        )
+
+    def test_select_slot_id(self):
+        """Select a token using an explicitly configured slot ID."""
+        provider_type = MagicMock()
+        selected_provider = provider_type.with_slot_id.return_value
+
+        with patch.object(builtins.pybergshamra, 'Pkcs11Provider', provider_type):
+            provider = builtins._select_pkcs11_provider(
+                "/usr/lib/libCryptoki2_64.so",
+                slot_id="17",
+            )
+
+        assert provider is selected_provider
+        provider_type.with_slot_id.assert_called_once_with("/usr/lib/libCryptoki2_64.so", 17)
+
+    @pytest.mark.parametrize(
+        "kwargs, message",
+        [
+            ({"token_serial": "serial"}, "token_serial requires token_label"),
+            ({"slot_id": 17, "token_label": "sc_ha"}, "slot_id cannot be combined"),
+            ({"uri_slot_id": 17, "slot_id": 18}, "Conflicting PKCS#11 slot IDs"),
+            ({"slot_id": "not-a-number"}, "Invalid PKCS#11 slot ID"),
+        ],
+    )
+    def test_reject_invalid_or_conflicting_selectors(self, kwargs, message):
+        """Reject incomplete, malformed, or mutually exclusive selectors."""
+        with pytest.raises(PipeException, match=message):
+            builtins._select_pkcs11_provider("/usr/lib/libCryptoki2_64.so", **kwargs)
+
+
 # noinspection PyUnresolvedReferences
 class SigningTest(PipeLineTest):
     def test_signing(self):
@@ -385,9 +458,10 @@ class SigningTest(PipeLineTest):
         # selected EntitiesDescriptor. `sign` must sign *that* element (and
         # `publish`/`emit` must carry the signature), not the enclosing
         # aggregate root that later gets thrown away.
+        from pyuppsala import etree
+
         from pyff.constants import NS
         from pyff.utils import check_signature
-        from pyuppsala import etree
 
         self.output = tempfile.NamedTemporaryFile('w').name
         res, _md = self.exec_pipeline(

@@ -1128,6 +1128,81 @@ def _discojson_sp_attr(req, *opts):
     return json.dumps(res)
 
 
+def _parse_pkcs11_key_uri(key_uri: str) -> tuple[str, str, str, Optional[int]]:
+    """Parse pyFF's historical PKCS#11 key URI syntax."""
+    if not key_uri.startswith("pkcs11://"):
+        raise PipeException(f"Malformed pkcs11 uri: {key_uri}")
+
+    module_and_slot, separator, label_and_query = key_uri[len("pkcs11://"):].rpartition('/')
+    if not separator or not module_and_slot or not label_and_query:
+        raise PipeException(f"Malformed pkcs11 uri (missing module path or object label): {key_uri}")
+
+    label, _, query = label_and_query.partition('?')
+    if not label:
+        raise PipeException(f"Malformed pkcs11 uri (missing object label): {key_uri}")
+
+    module_path = module_and_slot
+    uri_slot_id = None
+    path_without_slot, colon, slot_text = module_and_slot.rpartition(':')
+    if colon and re.fullmatch(r"-?\d+", slot_text):
+        try:
+            uri_slot_id = int(slot_text)
+        except ValueError as ex:
+            raise PipeException(f"Invalid PKCS#11 slot ID {slot_text!r}") from ex
+        if uri_slot_id < 0:
+            raise PipeException(f"Invalid PKCS#11 slot ID {slot_text!r}")
+        module_path = path_without_slot
+
+    pin_spec = "env:PYKCS11PIN"
+    if query:
+        for param in query.split('&'):
+            key, _, value = param.partition('=')
+            if key == 'pin':
+                pin_spec = value
+
+    return module_path, label, pin_spec, uri_slot_id
+
+
+def _select_pkcs11_provider(
+    module_path: str,
+    *,
+    uri_slot_id: Optional[int] = None,
+    slot_id=None,
+    token_label=None,
+    token_serial=None,
+):
+    """Create a provider using exactly one explicit token selector."""
+    configured_slot_id = None
+    if slot_id is not None:
+        if isinstance(slot_id, bool):
+            raise PipeException(f"Invalid PKCS#11 slot ID {slot_id!r}")
+        try:
+            configured_slot_id = int(slot_id)
+        except (TypeError, ValueError) as ex:
+            raise PipeException(f"Invalid PKCS#11 slot ID {slot_id!r}") from ex
+        if configured_slot_id < 0:
+            raise PipeException(f"Invalid PKCS#11 slot ID {slot_id!r}")
+
+    if uri_slot_id is not None and configured_slot_id is not None and uri_slot_id != configured_slot_id:
+        raise PipeException("Conflicting PKCS#11 slot IDs in key URI and sign configuration")
+
+    effective_slot_id = configured_slot_id if configured_slot_id is not None else uri_slot_id
+    if token_serial is not None and token_label is None:
+        raise PipeException("PKCS#11 token_serial requires token_label")
+    if effective_slot_id is not None and (token_label is not None or token_serial is not None):
+        raise PipeException("PKCS#11 slot_id cannot be combined with token_label or token_serial")
+
+    if token_label is not None:
+        return pybergshamra.Pkcs11Provider.with_token(
+            module_path,
+            str(token_label),
+            token_serial=None if token_serial is None else str(token_serial),
+        )
+    if effective_slot_id is not None:
+        return pybergshamra.Pkcs11Provider.with_slot_id(module_path, effective_slot_id)
+    return pybergshamra.Pkcs11Provider(module_path)
+
+
 @pipe
 def sign(req: Plumbing.Request, *_opts):
     """
@@ -1143,11 +1218,15 @@ def sign(req: Plumbing.Request, *_opts):
     The 'cert' argument may be empty in which case the cert is looked up using the PKCS#11 token, or may point
     to a file containing a PEM-encoded X.509 certificate.
 
+    When several initialized tokens are visible, select one with ``token_label`` and optional ``token_serial``,
+    or with ``slot_id``. Token selection requires pybergshamra 0.8.1 or newer. The slot may alternatively be
+    supplied using the historical ``:slot`` suffix in the key URI. Slot and token selectors are mutually exclusive.
+
     **PKCS11 URIs**
 
     A pkcs11 URI has the form
 
-    .. code-block:: xml
+    .. code-block:: text
 
         pkcs11://<absolute path to SO/DLL>[:slot]/<object label>[?pin=<pin>]
 
@@ -1160,9 +1239,13 @@ def sign(req: Plumbing.Request, *_opts):
     .. code-block:: yaml
 
         - sign:
-            key: pkcs11:///usr/lib/libsofthsm.so/signer
+            key: pkcs11:///usr/lib/libCryptoki2_64.so/sctest2
+            token_label: sc_ha
+            token_serial: "11429933786539" # optional when the label is unique
+            cert: /etc/credentials/sc-test-md-signer.crt
 
-    This would sign the document using the key with label 'signer' in slot 0 of the /usr/lib/libsofthsm.so module.
+    This signs with the key-object label ``sctest2`` on the token labelled ``sc_ha``. The PKCS#11 client library
+    still reads vendor connectivity and HA settings from its normal configuration, such as ``/etc/Chrystoki.conf``.
     Note that you may need to run pyff with env PYKCS11PIN=<pin> .... for this to work. Consult the documentation
     of your PKCS#11 module to find out about any other configuration you may need.
 
@@ -1186,6 +1269,8 @@ def sign(req: Plumbing.Request, *_opts):
 
     if key_file is None:
         raise PipeException("Missing key argument for sign pipe")
+    if not isinstance(key_file, str):
+        raise PipeException("The sign pipe key argument must be a string")
 
     if cert_file is None:
         log.info("Attempting to extract certificate from token...")
@@ -1209,22 +1294,7 @@ def sign(req: Plumbing.Request, *_opts):
         # HSM signing via PKCS#11. The URI form is:
         #   pkcs11://<module path>[:slot]/<label>[?pin=<pin>]
         # where pin may be "env:VARNAME" (default env:PYKCS11PIN).
-        rest = key_file[len("pkcs11://"):]
-        module_and_slot, _, label_and_query = rest.partition('/')
-        if not label_and_query:
-            raise PipeException(f"Malformed pkcs11 uri (missing object label): {key_file}")
-        # module path may carry an optional ":slot" suffix; the slot is selected
-        # automatically by pybergshamra (first slot with a token) so it is parsed
-        # off but not otherwise used here.
-        module_path, _, _slot = module_and_slot.partition(':')
-        label, _, query = label_and_query.partition('?')
-
-        pin_spec = "env:PYKCS11PIN"
-        if query:
-            for param in query.split('&'):
-                k, _, v = param.partition('=')
-                if k == 'pin':
-                    pin_spec = v
+        module_path, label, pin_spec, uri_slot_id = _parse_pkcs11_key_uri(key_file)
         if pin_spec.startswith("env:"):
             env_var = pin_spec[len("env:"):]
             pin = os.environ.get(env_var)
@@ -1233,7 +1303,13 @@ def sign(req: Plumbing.Request, *_opts):
         else:
             pin = pin_spec
 
-        provider = pybergshamra.Pkcs11Provider(module_path)
+        provider = _select_pkcs11_provider(
+            module_path,
+            uri_slot_id=uri_slot_id,
+            slot_id=req.args.get('slot_id'),
+            token_label=req.args.get('token_label'),
+            token_serial=req.args.get('token_serial'),
+        )
         session = provider.open_session(pin)
         signer = pybergshamra.Pkcs11Signer(session, label, pybergshamra.Algorithm.RSA_SHA256)
         ctx.set_hsm_signer(signer)
