@@ -2,6 +2,8 @@ import json
 import os
 import shutil
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from unittest.mock import MagicMock, patch
 
@@ -372,6 +374,11 @@ class SortTest(PipeLineTest):
 class TestPkcs11SigningConfig:
     """Verify parsing and validation of PKCS#11 signing selectors."""
 
+    @pytest.fixture(autouse=True)
+    def _isolated_provider_cache(self):
+        with patch.object(builtins, '_pkcs11_provider_cache', {}):
+            yield
+
     def test_parse_absolute_module_path(self):
         """Preserve an absolute module path and read the PIN environment selector."""
         module, label, pin, slot_id = builtins._parse_pkcs11_key_uri(
@@ -426,6 +433,74 @@ class TestPkcs11SigningConfig:
 
         assert provider is selected_provider
         provider_type.with_slot_id.assert_called_once_with("/usr/lib/libCryptoki2_64.so", 17)
+
+    def test_reuses_provider_for_equivalent_selector(self):
+        """Keep the vendor module loaded across repeated signing requests."""
+        provider_type = MagicMock()
+        selected_provider = provider_type.with_token.return_value
+
+        with patch.object(builtins.pybergshamra, 'Pkcs11Provider', provider_type):
+            first = builtins._select_pkcs11_provider(
+                "/usr/lib/libCryptoki2_64.so",
+                token_label="sc_ha",
+                token_serial=11429933786539,
+            )
+            second = builtins._select_pkcs11_provider(
+                "/usr/lib/libCryptoki2_64.so",
+                token_label="sc_ha",
+                token_serial="11429933786539",
+            )
+
+        assert first is selected_provider
+        assert second is selected_provider
+        provider_type.with_token.assert_called_once_with(
+            "/usr/lib/libCryptoki2_64.so",
+            "sc_ha",
+            token_serial="11429933786539",
+        )
+
+    def test_does_not_share_provider_between_selectors(self):
+        """Keep distinct token selections in separate cache entries."""
+        provider_type = MagicMock()
+
+        with patch.object(builtins.pybergshamra, 'Pkcs11Provider', provider_type):
+            builtins._select_pkcs11_provider(
+                "/usr/lib/libCryptoki2_64.so",
+                token_label="token-a",
+            )
+            builtins._select_pkcs11_provider(
+                "/usr/lib/libCryptoki2_64.so",
+                token_label="token-b",
+            )
+
+        assert provider_type.with_token.call_count == 2
+
+    def test_constructs_provider_once_during_concurrent_first_access(self):
+        """Serialize a cold cache so threaded requests cannot load twice."""
+        provider_type = MagicMock()
+        selected_provider = object()
+
+        def create_provider(*_args, **_kwargs):
+            time.sleep(0.05)
+            return selected_provider
+
+        provider_type.with_token.side_effect = create_provider
+
+        def select_provider():
+            return builtins._select_pkcs11_provider(
+                "/usr/lib/libCryptoki2_64.so",
+                token_label="sc_ha",
+                token_serial="11429933786539",
+            )
+
+        with (
+            patch.object(builtins.pybergshamra, 'Pkcs11Provider', provider_type),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            providers = list(executor.map(lambda _item: select_provider(), range(2)))
+
+        assert providers == [selected_provider, selected_provider]
+        provider_type.with_token.assert_called_once()
 
     def test_pkcs11_signing_uses_owned_document(self):
         """Keep PKCS#11 signing away from the shared native document capsule."""

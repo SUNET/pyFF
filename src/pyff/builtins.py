@@ -10,6 +10,7 @@ import operator
 import os
 import re
 import sys
+import threading
 import traceback
 from copy import deepcopy
 from datetime import datetime
@@ -65,6 +66,14 @@ __author__ = 'leifj'
 
 FILESPEC_REGEX = r'([^ \t\n\r\f\v]+)\s+as\s+([^ \t\n\r\f\v]+)'
 log = get_log(__name__)
+
+# PKCS#11 providers own the dynamically loaded vendor module. Keep them alive
+# for the worker process lifetime: some modules (including Luna) start native
+# background threads that outlive a provider object, so unloading and loading
+# the module again can leave those threads executing unmapped code. Sessions
+# remain short-lived and are opened separately for each signing operation.
+_pkcs11_provider_cache = {}
+_pkcs11_provider_cache_lock = threading.Lock()
 
 
 @pipe
@@ -1171,7 +1180,7 @@ def _select_pkcs11_provider(
     token_label=None,
     token_serial=None,
 ):
-    """Create a provider using exactly one explicit token selector."""
+    """Get a process-cached provider using exactly one token selector."""
     configured_slot_id = None
     if slot_id is not None:
         if isinstance(slot_id, bool):
@@ -1192,15 +1201,36 @@ def _select_pkcs11_provider(
     if effective_slot_id is not None and (token_label is not None or token_serial is not None):
         raise PipeException("PKCS#11 slot_id cannot be combined with token_label or token_serial")
 
-    if token_label is not None:
-        return pybergshamra.Pkcs11Provider.with_token(
-            module_path,
-            str(token_label),
-            token_serial=None if token_serial is None else str(token_serial),
-        )
-    if effective_slot_id is not None:
-        return pybergshamra.Pkcs11Provider.with_slot_id(module_path, effective_slot_id)
-    return pybergshamra.Pkcs11Provider(module_path)
+    normalized_token_label = None if token_label is None else str(token_label)
+    normalized_token_serial = None if token_serial is None else str(token_serial)
+    cache_key = (
+        os.path.realpath(module_path),
+        effective_slot_id,
+        normalized_token_label,
+        normalized_token_serial,
+    )
+
+    # Hold the lock through construction. functools.lru_cache and a
+    # check-then-create sequence can both invoke the constructor more than once
+    # during concurrent first access, which is precisely what vendor modules
+    # with process-global initialization cannot safely tolerate.
+    with _pkcs11_provider_cache_lock:
+        if cache_key in _pkcs11_provider_cache:
+            return _pkcs11_provider_cache[cache_key]
+
+        if normalized_token_label is not None:
+            provider = pybergshamra.Pkcs11Provider.with_token(
+                module_path,
+                normalized_token_label,
+                token_serial=normalized_token_serial,
+            )
+        elif effective_slot_id is not None:
+            provider = pybergshamra.Pkcs11Provider.with_slot_id(module_path, effective_slot_id)
+        else:
+            provider = pybergshamra.Pkcs11Provider(module_path)
+
+        _pkcs11_provider_cache[cache_key] = provider
+        return provider
 
 
 @pipe
