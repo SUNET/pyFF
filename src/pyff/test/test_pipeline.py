@@ -1042,6 +1042,11 @@ class SigningTest(PipeLineTest):
         XMLSchema URI, but only 'xs' is ever referenced (via xsi:type="xs:string"). The
         genuinely unused 'xsd' declaration must still be pruned.
         """
+        from pyuppsala import etree
+
+        if not hasattr(etree, 'cleanup_namespaces'):
+            self.skipTest("the XML backend does not support namespace cleanup")
+
         entity = 'https://app.comfact.se/pdss/metadata/d70a69a512a2418f'
         tmpfile = tempfile.NamedTemporaryFile('w').name
         try:

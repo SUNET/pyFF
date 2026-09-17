@@ -517,11 +517,15 @@ def entitiesdescriptor(
         # reparse per entity) on the pyuppsala backend; append alone already protects the source.
         t.append(entity)
 
-    # Clean unused namespaces. Prefixes referenced only from QName-valued attributes
-    # (xsi:type="xsd:string") are invisible to lxml's usage tracking, so collect and
-    # preserve them explicitly - see issue #333.
-    keep_ns_prefixes = qname_prefixes(t)
-    etree.cleanup_namespaces(t, keep_ns_prefixes=keep_ns_prefixes)
+    # lxml can prune unused namespace declarations after building the aggregate.
+    # pyuppsala preserves the declarations needed by imported subtrees but does
+    # not expose lxml's optional cleanup helper, so only request cleanup from
+    # backends that implement it.
+    cleanup_namespaces = getattr(etree, 'cleanup_namespaces', None)
+    if cleanup_namespaces is not None:
+        # Prefixes referenced only from QName-valued attributes
+        # (xsi:type="xsd:string") are invisible to lxml's usage tracking.
+        cleanup_namespaces(t, keep_ns_prefixes=qname_prefixes(t))
 
     if config.devel_write_xml_to_file:
         import os
