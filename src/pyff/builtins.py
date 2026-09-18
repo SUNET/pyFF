@@ -27,18 +27,40 @@ from pyff.constants import NS
 from pyff.decorators import deprecated
 from pyff.exceptions import MetadataException
 from pyff.logs import get_log
-from pyff.pipes import (PipeException, PipelineCallback, Plumbing, pipe,
-                        registry)
-from pyff.samlmd import (annotate_entity, discojson_sp_attr_t, discojson_sp_t,
-                         discojson_t, entitiesdescriptor, find_in_document,
-                         iter_entities, resolve_entities,
-                         set_entity_attributes, set_nodecountry, set_pubinfo,
-                         set_reginfo, sort_entities)
-from pyff.utils import (cert_dict, cert_info, datetime2iso, dumptree,
-                        duration2timedelta, hash_id, is_document_root,
-                        iso2datetime, parse_xml, root, safe_write,
-                        total_seconds, utc_now, validate_document, with_tree,
-                        xslt_transform)
+from pyff.pipes import PipeException, PipelineCallback, Plumbing, pipe, registry
+from pyff.samlmd import (
+    annotate_entity,
+    discojson_sp_attr_t,
+    discojson_sp_t,
+    discojson_t,
+    entitiesdescriptor,
+    find_in_document,
+    iter_entities,
+    resolve_entities,
+    set_entity_attributes,
+    set_nodecountry,
+    set_pubinfo,
+    set_reginfo,
+    sort_entities,
+)
+from pyff.utils import (
+    cert_dict,
+    cert_info,
+    datetime2iso,
+    dumptree,
+    duration2timedelta,
+    hash_id,
+    is_document_root,
+    iso2datetime,
+    parse_xml,
+    root,
+    safe_write,
+    total_seconds,
+    utc_now,
+    validate_document,
+    with_tree,
+    xslt_transform,
+)
 
 __author__ = 'leifj'
 
