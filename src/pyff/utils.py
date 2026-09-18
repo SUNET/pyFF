@@ -60,14 +60,12 @@ from pyff.logs import get_log
 # //md:EntityDescriptor would trip the default cap. Raise the module budget to a
 # value comfortably above real-world aggregate sizes while still bounding a
 # runaway evaluation.
-if hasattr(etree, 'MAX_XPATH_NODE_VISITS'):
-    etree.MAX_XPATH_NODE_VISITS = max(etree.MAX_XPATH_NODE_VISITS, 50_000_000)
+etree.MAX_XPATH_NODE_VISITS = max(etree.MAX_XPATH_NODE_VISITS, 50_000_000)
 
 __author__ = 'leifj'
 
 log = get_log(__name__)
 
-sentinel = object()
 thread_data = local()
 
 
@@ -318,19 +316,15 @@ def check_signature(t: ElementTree, key: Optional[str], only_one_signature: bool
         ctx.trusted_keys_only = True
 
     relt = root(t)
-    if (
-        hasattr(pybergshamra, 'verify_document')
-        and hasattr(etree, 'native_document')
-        and is_document_root(relt)
-    ):
+    if is_document_root(relt):
         # Verify directly against the shared native DOM (pyuppsala document
         # handle): no serialization of the working tree and no re-parse
         # inside the verifier. Only valid when ``relt`` *is* the document --
         # for a subtree the native document would be the enclosing aggregate.
         result = pybergshamra.verify_document(ctx, etree.native_document(relt))
     else:
-        # Older pybergshamra, or a subtree of a larger document: render the
-        # working tree to a string and verify that.
+        # A subtree of a larger document must be rendered and verified on its
+        # own; the native document is the enclosing aggregate.
         xml = dumptree(relt, xml_declaration=False)
         if isinstance(xml, bytes):
             xml = xml.decode('utf-8')
@@ -719,16 +713,8 @@ def parse_xml(io: BinaryIO, base_url: Optional[str] = None) -> ElementTree:
 
 
 def has_tag(t, tag):
-    # pyuppsala elements expose native subtree probes that avoid materializing
-    # Python element proxies; fall back to a lazy iter for other backends.
-    fast_has = getattr(t, 'fast_has', None)
-    if fast_has is not None:
-        return fast_has(tag)
-    fast_count = getattr(t, 'fast_count', None)
-    if fast_count is not None:
-        return fast_count(tag) > 0
-    tags = t.iter(tag)
-    return next(tags, sentinel) is not sentinel
+    # Keep the subtree scan in Rust and avoid materializing Python proxies.
+    return t.fast_has(tag)
 
 
 def url2host(url):

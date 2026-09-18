@@ -1016,14 +1016,23 @@ class SigningTest(PipeLineTest):
         )
         tmpfile = tempfile.NamedTemporaryFile('w').name
         try:
-            self.exec_pipeline(
-                f"""
+            # PKCS11 signing uses the owned-string path rather than the native
+            # document path. Force the same path here without requiring an HSM.
+            with patch.object(builtins, 'is_document_root', return_value=False):
+                self.exec_pipeline(
+                    f"""
 - load:
    - file://{self.datadir}/metadata/test05-xsd-prefix-idp.xml
 - select
+- finalize:
+    cacheDuration: PT5H
+    validUntil: P10D
+- sign:
+    key: {self.private_keyspec}
+    cert: {self.public_keyspec}
 - publish: {tmpfile}
 """
-            )
+                )
             t2 = parse_xml(tmpfile)
             assert t2 is not None
             entity_elt = t2.find(".//{{{}}}EntityDescriptor[@entityID='{}']".format(NS['md'], entity))

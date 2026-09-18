@@ -659,29 +659,15 @@ def _domains(entity):
 
 
 def with_entity_attributes(entity, cb):
-    def _stext(e):
-        if e.text is not None:
-            return e.text.strip()
-
-    # pyuppsala can collect the (Name, [AttributeValue text...]) groups natively
-    # in one pass without creating a Python proxy per node.
-    fast_collect = getattr(entity, 'fast_collect_grouped_text', None)
-    if fast_collect is not None:
-        for an, values in fast_collect(
-            "{{{}}}EntityAttributes".format(NS['mdattr']),
-            "{{{}}}Attribute".format(NS['saml']),
-            'Name',
-            "{{{}}}AttributeValue".format(NS['saml']),
-        ):
-            cb(an, values)
-        return
-
-    for ea in entity.iter("{{{}}}EntityAttributes".format(NS['mdattr'])):
-        for a in ea.iter("{{{}}}Attribute".format(NS['saml'])):
-            an = a.get('Name', None)
-            if a is not None:
-                values = [x for x in [_stext(v) for v in a.iter("{{{}}}AttributeValue".format(NS['saml']))] if x is not None]
-                cb(an, values)
+    # Collect the (Name, [AttributeValue text...]) groups in one native pass
+    # without creating a Python proxy per node.
+    for an, values in entity.fast_collect_grouped_text(
+        "{{{}}}EntityAttributes".format(NS['mdattr']),
+        "{{{}}}Attribute".format(NS['saml']),
+        'Name',
+        "{{{}}}AttributeValue".format(NS['saml']),
+    ):
+        cb(an, values)
 
 
 def _all_domains_and_subdomains(entity):

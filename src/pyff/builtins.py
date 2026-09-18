@@ -1320,12 +1320,7 @@ def sign(req: Plumbing.Request, *_opts):
         key = pybergshamra.load_key_file(key_file)
         mgr.add_key(key)
 
-    if (
-        not is_pkcs11_key
-        and hasattr(pybergshamra, 'sign_enveloped_document')
-        and hasattr(etree, 'native_document')
-        and is_document_root(relt)
-    ):
+    if not is_pkcs11_key and is_document_root(relt):
         # Sign the working tree in place through the shared native DOM
         # (pyuppsala document handle). This avoids serializing the whole
         # aggregate, the signer's internal re-parses, and the reparse of the
@@ -1349,10 +1344,10 @@ def sign(req: Plumbing.Request, *_opts):
         pybergshamra.sign_enveloped_document(ctx, doc, reference_id=idattr, cert_pem=cert_pem)
         req.t = relt
     else:
-        # Older pybergshamra without the document API, or a subtree of a
-        # larger document (small, so the string round trip is cheap):
-        # serialize the working document, build the enveloped signature, sign,
-        # and reparse so downstream pipes see a standalone pyuppsala element.
+        # PKCS11 signing, or a subtree of a larger document (small, so the
+        # string round trip is cheap): serialize the working document, build
+        # the enveloped signature, sign, and reparse so downstream pipes see a
+        # standalone pyuppsala element.
         xml = etree.tostring(relt, encoding='unicode')
         signed = pybergshamra.sign_enveloped(ctx, xml, reference_id=idattr, cert_pem=cert_pem)
         req.t = root(etree.fromstring(signed))
@@ -1388,20 +1383,12 @@ def stats(req: Plumbing.Request, *opts):
     if req.t is not None:
         idp_descriptor = "{{{}}}IDPSSODescriptor".format(NS['md'])
         sp_descriptor = "{{{}}}SPSSODescriptor".format(NS['md'])
-        fast_count = getattr(req.t, 'fast_count', None)
-        if fast_count is not None:
-            # Native subtree counts: no Python proxy per entity. These count
-            # role descriptor elements, which equals the entities-with-role
-            # count below except for the rare entity that carries two
-            # same-type role descriptors (e.g. per protocolSupportEnumeration).
-            selected = fast_count("{{{}}}EntityDescriptor".format(NS['md']))
-            idps = fast_count(idp_descriptor)
-            sps = fast_count(sp_descriptor)
-        else:
-            entities = list(iter_entities(req.t))
-            selected = len(entities)
-            idps = sum(e.find(idp_descriptor) is not None for e in entities)
-            sps = sum(e.find(sp_descriptor) is not None for e in entities)
+        # Native subtree counts avoid creating a Python proxy per entity. Role
+        # descriptor counts equal entities-with-role except for the rare entity
+        # carrying two same-type descriptors.
+        selected = req.t.fast_count("{{{}}}EntityDescriptor".format(NS['md']))
+        idps = req.t.fast_count(idp_descriptor)
+        sps = req.t.fast_count(sp_descriptor)
         print("selected:       {:d}".format(selected))
         print("          idps: {:d}".format(idps))
         print("           sps: {:d}".format(sps))
